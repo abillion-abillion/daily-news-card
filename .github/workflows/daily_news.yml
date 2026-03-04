@@ -1,0 +1,40 @@
+name: Daily News Card
+
+on:
+  schedule:
+    # 매일 오전 8시 KST = UTC 23:00 (전날)
+    - cron: '0 23 * * *'
+  workflow_dispatch:  # 수동 실행 버튼 (테스트용)
+
+jobs:
+  generate-and-send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 의존성 설치
+        run: |
+          pip install anthropic requests playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: 뉴스 카드 생성 및 텔레그램 발송
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: 생성된 카드 이미지 저장 (기록용)
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-card-${{ github.run_id }}
+          path: news_card_*.png
+          retention-days: 30
