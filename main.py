@@ -3,6 +3,7 @@ import json
 import requests
 import anthropic
 from datetime import datetime
+import pytz
 from playwright.sync_api import sync_playwright
 
 # ── 환경변수 ──────────────────────────────────────────
@@ -14,8 +15,10 @@ TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 def generate_news_card_html() -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    today = datetime.now().strftime("%Y. %m. %d")
-    weekday = ["MON","TUE","WED","THU","FRI","SAT","SUN"][datetime.now().weekday()]
+    kst = pytz.timezone("Asia/Seoul")
+    now_kst = datetime.now(kst)
+    today = now_kst.strftime("%Y. %m. %d")
+    weekday = ["MON","TUE","WED","THU","FRI","SAT","SUN"][now_kst.weekday()]
 
     prompt = f"""
 오늘({today})의 한국 경제·금융 핵심 뉴스 5가지와 주식시장 동향을 조사해서,
@@ -272,7 +275,8 @@ def send_to_telegram(image_path: str):
 
 # ── 메인 실행 ─────────────────────────────────────────
 if __name__ == "__main__":
-    today_file = datetime.now().strftime("%Y%m%d")
+    kst = pytz.timezone("Asia/Seoul")
+    today_file = datetime.now(kst).strftime("%Y%m%d")
     output_png = f"news_card_{today_file}.png"
 
     print("🔍 뉴스 수집 및 카드 생성 중...")
