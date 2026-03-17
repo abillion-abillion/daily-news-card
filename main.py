@@ -22,27 +22,27 @@ TODAY_KR   = now_kst.strftime("%Y년 %m월 %d일")
 
 # ── RSS 피드 목록 (다양하게 확장) ──────────────────────
 RSS_FEEDS = [
-    {{"name": "한국경제-경제",  "url": "https://www.hankyung.com/feed/economy"}},
-    {{"name": "한국경제-금융",  "url": "https://www.hankyung.com/feed/finance"}},
-    {{"name": "한국경제-증권",  "url": "https://www.hankyung.com/feed/stock"}},
-    {{"name": "연합뉴스-경제",  "url": "https://www.yonhapnews.co.kr/rss/economy.xml"}},
-    {{"name": "연합뉴스-금융",  "url": "https://www.yonhapnews.co.kr/rss/finance.xml"}},
-    {{"name": "매일경제",       "url": "https://www.mk.co.kr/rss/30100041/"}},
-    {{"name": "매일경제-증권",  "url": "https://www.mk.co.kr/rss/30200030/"}},
-    {{"name": "조선비즈",       "url": "https://biz.chosun.com/arc/outboundfeeds/rss/?outputType=xml"}},
-    {{"name": "SBS-경제",       "url": "https://news.sbs.co.kr/news/RSS.jsp?cateId=economy"}},
-    {{"name": "KBS-경제",       "url": "https://news.kbs.co.kr/rss/news/news_economy.xml"}},
+    {"name": "한국경제-경제",  "url": "https://www.hankyung.com/feed/economy"},
+    {"name": "한국경제-금융",  "url": "https://www.hankyung.com/feed/finance"},
+    {"name": "한국경제-증권",  "url": "https://www.hankyung.com/feed/stock"},
+    {"name": "연합뉴스-경제",  "url": "https://www.yonhapnews.co.kr/rss/economy.xml"},
+    {"name": "연합뉴스-금융",  "url": "https://www.yonhapnews.co.kr/rss/finance.xml"},
+    {"name": "매일경제",       "url": "https://www.mk.co.kr/rss/30100041/"},
+    {"name": "매일경제-증권",  "url": "https://www.mk.co.kr/rss/30200030/"},
+    {"name": "조선비즈",       "url": "https://biz.chosun.com/arc/outboundfeeds/rss/?outputType=xml"},
+    {"name": "SBS-경제",       "url": "https://news.sbs.co.kr/news/RSS.jsp?cateId=economy"},
+    {"name": "KBS-경제",       "url": "https://news.kbs.co.kr/rss/news/news_economy.xml"},
 ]
 
 # ── 1. RSS에서 뉴스 수집 ──────────────────────────────
 def fetch_rss_news(max_per_feed=8):
     """RSS 피드에서 최신 기사 수집 (날짜 필터 완화)"""
     articles = []
-    headers  = {{
+    headers  = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
         "Accept-Language": "ko-KR,ko;q=0.9",
-    }}
+    }
 
     # 오늘 + 어제까지 허용 (pubDate 형식 불일치 대비)
     today_kst     = now_kst.date()
@@ -90,20 +90,20 @@ def fetch_rss_news(max_per_feed=8):
                     is_recent = True
 
                 if is_recent:
-                    articles.append({{
+                    articles.append({
                         "source": feed["name"],
                         "title":  title,
                         "desc":   desc[:300],
                         "date":   pub_date,
-                    }})
+                    })
                     count += 1
 
-            print(f"✅ {{feed['name']}}: {{count}}개 수집")
+            print(f"✅ {feed['name']}: {count}개 수집")
 
         except Exception as e:
-            print(f"⚠️  {{feed['name']}} 실패: {{e}}")
+            print(f"⚠️  {feed['name']} 실패: {e}")
 
-    print(f"\n📰 총 {{len(articles)}}개 기사 수집\n")
+    print(f"\n📰 총 {len(articles)}개 기사 수집\n")
     return articles
 
 
@@ -113,7 +113,7 @@ def generate_card_html(articles):
 
     articles_text = ""
     for i, a in enumerate(articles, 1):
-        articles_text += f"\n[{{i}}] 출처: {{a['source']}} | 날짜: {{a['date']}}\n제목: {{a['title']}}\n내용: {{a['desc']}}\n---"
+        articles_text += f"\n[{i}] 출처: {a['source']} | 날짜: {a['date']}\n제목: {a['title']}\n내용: {a['desc']}\n---"
 
     prompt = f"""
 아래는 {TODAY_KR} 최신 한국 경제·금융 뉴스 기사들이야.
