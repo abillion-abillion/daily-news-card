@@ -277,7 +277,7 @@ def generate_card_html(articles):
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=4096,
-        messages=[{{"role": "user", "content": prompt}}]
+        messages=[{"role": "user", "content": prompt}]
     )
 
     html_content = message.content[0].text
@@ -296,39 +296,39 @@ def html_to_png(html_content, output_path):
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={{"width": 900, "height": 1200}})
-        page.goto(f"file://{{os.path.abspath('temp_card.html')}}")
+        page = browser.new_page(viewport={"width": 900, "height": 1200})
+        page.goto(f"file://{os.path.abspath('temp_card.html')}")
         page.wait_for_timeout(2000)
         page.screenshot(path=output_path, full_page=True)
         browser.close()
 
     os.remove("temp_card.html")
-    print(f"✅ PNG 생성 완료: {{output_path}}")
+    print(f"✅ PNG 생성 완료: {output_path}")
 
 
 # ── 4. 텔레그램 발송 ──────────────────────────────────
 def send_to_telegram(image_path):
-    caption  = f"📊 {{TODAY_KR}} 경제 핵심 뉴스\nHeomoney Daily Brief"
-    url      = f"https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/sendPhoto"
+    caption  = f"📊 {TODAY_KR} 경제 핵심 뉴스\nHeomoney Daily Brief"
+    url      = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
 
     with open(image_path, "rb") as img:
-        response = requests.post(url, data={{
+        response = requests.post(url, data={
             "chat_id": TELEGRAM_CHAT_ID,
             "caption": caption
-        }}, files={{"photo": img}})
+        }, files={"photo": img})
 
     if response.status_code == 200:
         print("✅ 텔레그램 발송 완료")
     else:
-        print(f"❌ 텔레그램 발송 실패: {{response.text}}")
-        raise Exception(f"Telegram error: {{response.text}}")
+        print(f"❌ 텔레그램 발송 실패: {response.text}")
+        raise Exception(f"Telegram error: {response.text}")
 
 
 # ── 메인 실행 ─────────────────────────────────────────
 if __name__ == "__main__":
-    output_png = f"news_card_{{TODAY_FILE}}.png"
+    output_png = f"news_card_{TODAY_FILE}.png"
 
-    print(f"📅 기준 날짜: {{TODAY_KR}} (KST)\n")
+    print(f"📅 기준 날짜: {TODAY_KR} (KST)\n")
 
     print("📰 RSS 뉴스 수집 중...")
     articles = fetch_rss_news(max_per_feed=8)
