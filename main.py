@@ -1,11 +1,14 @@
 import os
-import requests
-import anthropic
-import pytz
+import csv
+import io
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
+
+import requests
+import anthropic
+import pytz
 
 # ── 환경변수 ──────────────────────────────────────────
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
@@ -34,104 +37,89 @@ RSS_FEEDS = [
     {"name": "KBS-경제",       "url": "https://news.kbs.co.kr/rss/news/news_economy.xml"},
 ]
 
+# ── 공통 헤더 ─────────────────────────────────────────
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+# ══════════════════════════════════════════════════════
+# stooq CSV 한 줄 파싱 헬퍼
+# 반환: 최신 종가(float) or None
+# ══════════════════════════════════════════════════════
+def _stooq_close(symbol: str) -> float | None:
+    """
+    stooq.com에서 일봉 CSV를 받아 최신 종가를 반환.
+    GitHub Actions 환경에서 IP 차단 없이 동작 확인된 소스.
+    """
+    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+    try:
+        r = requests.get(url, headers={"User-Agent": BROWSER_UA}, timeout=10)
+        r.raise_for_status()
+        reader = csv.DictReader(io.StringIO(r.text))
+        rows = list(reader)
+        if not rows:
+            return None
+        # 최신 날짜 행 (마지막 행)
+        last = rows[-1]
+        close = last.get("Close") or last.get("close")
+        return float(close) if close and close.strip() not in ("", "null") else None
+    except Exception as e:
+        print(f"⚠️  stooq [{symbol}] 실패: {e}")
+        return None
+
 
 # ══════════════════════════════════════════════════════
 # 1. 시장 지표 수집
-#    코스피/코스닥 → KRX 정보데이터시스템
-#    환율          → open.er-api.com (무료, 키 불필요)
-#                    or 한국수출입은행 (키 있을 때)
-#    유가          → 오피넷 (키 있을 때)
+#    코스피/코스닥 → stooq.com (^ksp / ^kosdaq)
+#    USD/KRW      → open.er-api.com (무료, 키 불필요)
+#    금값(XAU)    → stooq.com (xauusd) × USD/KRW
+#    휘발유       → 오피넷 메인 HTML 스크래핑 (키 불필요)
 # ══════════════════════════════════════════════════════
 def fetch_market_data() -> dict:
     data = {
         "kospi":    "-",
         "kosdaq":   "-",
         "usd_krw":  "-",
-        "jpy_krw":  "-",
+        "gold_krw": "-",
         "gasoline": "-",
     }
 
-    # ── 코스피 / 코스닥: KRX 정보데이터시스템 ────────────
-    krx_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Referer": "https://marketdata.krx.co.kr/",
-        "Origin": "https://marketdata.krx.co.kr",
-    }
-    strt_dd = (now_kst - timedelta(days=7)).strftime("%Y%m%d")
-    end_dd  = now_kst.strftime("%Y%m%d")
+    # ── 코스피 ───────────────────────────────────────
+    v = _stooq_close("^ksp")
+    if v:
+        data["kospi"] = f"{v:,.2f}"
 
-    for mktid, key in [("STK", "kospi"), ("KSQ", "kosdaq")]:
-        try:
-            r = requests.post(
-                "https://marketdata.krx.co.kr/contents/MDC/STAT/standard/MDCSTAT00301",
-                headers=krx_headers,
-                data={
-                    "mktId": mktid,
-                    "strtDd": strt_dd,
-                    "endDd": end_dd,
-                    "share": "1",
-                    "money": "1",
-                    "csvxls_isNo": "false",
-                },
-                timeout=10,
-            )
-            if r.ok:
-                rows = r.json().get("output", [])
-                if rows:
-                    val = rows[0].get("CLSPRC_IDX", rows[0].get("clsprc_idx", "")).replace(",", "")
-                    if val:
-                        data[key] = f"{float(val):,.2f}"
-        except Exception as e:
-            print(f"⚠️  {key} KRX 수집 실패: {e}")
+    # ── 코스닥 ───────────────────────────────────────
+    v = _stooq_close("^kosdaq")
+    if v:
+        data["kosdaq"] = f"{v:,.2f}"
 
-    # ── 환율: 수출입은행 키 있으면 우선, 없으면 open.er-api ─
-    exim_key = os.environ.get("KOREAEXIM_API_KEY", "")
+    # ── USD/KRW ──────────────────────────────────────
+    usd_krw_float = None
+    try:
+        r = requests.get("https://open.er-api.com/v6/latest/USD",
+                         timeout=8)
+        if r.ok:
+            usd_krw_float = r.json().get("rates", {}).get("KRW")
+            if usd_krw_float:
+                data["usd_krw"] = f"{usd_krw_float:,.0f}"
+    except Exception as e:
+        print(f"⚠️  USD/KRW 실패: {e}")
 
-    # 주말이면 가장 최근 평일
-    search_dt = now_kst
-    for _ in range(5):
-        if search_dt.weekday() < 5:
-            break
-        search_dt -= timedelta(days=1)
-    search_date = search_dt.strftime("%Y%m%d")
+    # ── 금값 (XAU/USD → 원화 환산) ───────────────────
+    xau_usd = _stooq_close("xauusd")
+    if xau_usd and usd_krw_float:
+        gold_krw = xau_usd * usd_krw_float
+        data["gold_krw"] = f"{gold_krw:,.0f}"
+    elif xau_usd:
+        # 환율 없으면 달러 기준으로만 표시
+        data["gold_krw"] = f"${xau_usd:,.0f}"
 
-    fetched_fx = False
-    if exim_key:
-        try:
-            r = requests.get(
-                f"https://www.koreaexim.go.kr/site/program/financial/exchangeJSON"
-                f"?authkey={exim_key}&searchdate={search_date}&data=AP01",
-                timeout=8,
-            )
-            if r.ok and r.json():
-                for item in r.json():
-                    cur = item.get("cur_unit", "")
-                    val = item.get("deal_bas_r", "").replace(",", "")
-                    if cur == "USD" and val:
-                        data["usd_krw"] = f"{float(val):,.0f}"
-                        fetched_fx = True
-                    elif cur == "JPY(100)" and val:
-                        data["jpy_krw"] = f"{float(val):,.2f}"
-        except Exception as e:
-            print(f"⚠️  수출입은행 환율 실패: {e}")
-
-    if not fetched_fx:
-        # 백업: open.er-api.com (무료, 인증 불필요, GitHub Actions에서 접근 가능)
-        try:
-            r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
-            if r.ok:
-                rates = r.json().get("rates", {})
-                krw = rates.get("KRW", 0)
-                jpy = rates.get("JPY", 0)
-                if krw:
-                    data["usd_krw"] = f"{krw:,.0f}"
-                if krw and jpy:
-                    data["jpy_krw"] = f"{krw / jpy * 100:,.2f}"
-        except Exception as e:
-            print(f"⚠️  환율 백업 실패: {e}")
-
-    # ── 유가: 오피넷 키 있을 때만 ────────────────────────
+    # ── 휘발유: 오피넷 메인 HTML 스크래핑 ─────────────
+    # 오피넷 키 있으면 API 우선, 없으면 HTML 파싱
     opinet_key = os.environ.get("OPINET_API_KEY", "")
     if opinet_key:
         try:
@@ -145,10 +133,36 @@ def fetch_market_data() -> dict:
                 if items:
                     data["gasoline"] = f"{float(items[0]['PRICE']):,.0f}"
         except Exception as e:
-            print(f"⚠️  유가 수집 실패: {e}")
+            print(f"⚠️  오피넷 API 실패: {e}")
+    else:
+        # 키 없을 때: 오피넷 공시가격 페이지 스크래핑
+        try:
+            r = requests.get(
+                "https://www.opinet.co.kr/user/main/mainView.do",
+                headers={"User-Agent": BROWSER_UA},
+                timeout=10,
+            )
+            if r.ok:
+                # 전국 평균 휘발유 가격 패턴: 숫자 4자리 앞뒤
+                matches = re.findall(r"1[,\.]?\d{3}[\.,]\d", r.text)
+                prices = []
+                for m in matches:
+                    try:
+                        prices.append(float(m.replace(",", ".")))
+                    except Exception:
+                        pass
+                if prices:
+                    # 1700~2200 범위 값만 필터 (휘발유 합리적 범위)
+                    valid = [p for p in prices if 1700 <= p <= 2200]
+                    if valid:
+                        data["gasoline"] = f"{valid[0]:,.1f}"
+        except Exception as e:
+            print(f"⚠️  오피넷 스크래핑 실패: {e}")
 
-    print(f"📊 코스피:{data['kospi']} 코스닥:{data['kosdaq']} "
-          f"USD:{data['usd_krw']} JPY:{data['jpy_krw']} 유가:{data['gasoline']}")
+    print(
+        f"📊 코스피:{data['kospi']} 코스닥:{data['kosdaq']} "
+        f"USD:{data['usd_krw']} 금:{data['gold_krw']} 유가:{data['gasoline']}"
+    )
     return data
 
 
@@ -157,8 +171,8 @@ def fetch_market_data() -> dict:
 # ══════════════════════════════════════════════════════
 def fetch_rss_news(max_per_feed=8):
     articles = []
-    headers  = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    headers = {
+        "User-Agent": BROWSER_UA,
         "Accept": "application/rss+xml, application/xml, text/xml, */*",
         "Accept-Language": "ko-KR,ko;q=0.9",
     }
@@ -176,37 +190,26 @@ def fetch_rss_news(max_per_feed=8):
 
             items = root.findall(".//item")
             count = 0
-
             for item in items:
                 if count >= max_per_feed:
                     break
                 title    = item.findtext("title", "").strip()
                 pub_date = item.findtext("pubDate", "")
                 desc     = re.sub(r"<[^>]+>", "", item.findtext("description", "")).strip()
-
                 if not title:
                     continue
-
                 is_recent = False
                 try:
                     from email.utils import parsedate_to_datetime
-                    pub_dt = parsedate_to_datetime(pub_date)
-                    if pub_dt.astimezone(kst).date() >= yesterday_kst:
+                    if parsedate_to_datetime(pub_date).astimezone(kst).date() >= yesterday_kst:
                         is_recent = True
                 except Exception:
                     is_recent = True
-
                 if is_recent:
-                    articles.append({
-                        "source": feed["name"],
-                        "title":  title,
-                        "desc":   desc[:500],
-                        "date":   pub_date,
-                    })
+                    articles.append({"source": feed["name"], "title": title,
+                                     "desc": desc[:500], "date": pub_date})
                     count += 1
-
             print(f"✅ {feed['name']}: {count}개 수집")
-
         except Exception as e:
             print(f"⚠️  {feed['name']} 실패: {e}")
 
@@ -215,19 +218,22 @@ def fetch_rss_news(max_per_feed=8):
 
 
 # ══════════════════════════════════════════════════════
-# 3. Claude → HTML 카드 생성
+# 3. Claude → HTML 카드 생성 (JPY → 금값으로 교체)
 # ══════════════════════════════════════════════════════
 def generate_card_html(articles, market):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     articles_text = ""
     for i, a in enumerate(articles, 1):
-        articles_text += f"\n[{i}] 출처: {a['source']} | 날짜: {a['date']}\n제목: {a['title']}\n내용: {a['desc']}\n---"
+        articles_text += (
+            f"\n[{i}] 출처: {a['source']} | 날짜: {a['date']}\n"
+            f"제목: {a['title']}\n내용: {a['desc']}\n---"
+        )
 
     kospi    = market["kospi"]
     kosdaq   = market["kosdaq"]
     usd_krw  = market["usd_krw"]
-    jpy_krw  = market["jpy_krw"]
+    gold_krw = market["gold_krw"]
     gasoline = market["gasoline"]
 
     prompt = f"""
@@ -236,7 +242,7 @@ def generate_card_html(articles, market):
 
 【규칙】
 - 반드시 아래 제공된 기사 내용만 사용 (없는 내용 절대 만들지 말 것)
-- 수치(%, 금액, bp 등)는 기사에 명시된 것만 사용. 없으면 수치 없이 작성
+- 수치는 기사에 명시된 것만 사용. 없으면 수치 없이 작성
 - 육하원칙(누가/언제/어디서/무엇을/어떻게/왜)을 지킬 것
 - 투자 시사점은 기사 내용에서 논리적으로 도출 가능한 것만 작성
 - 전문 애널리스트가 쓴 것처럼 간결하고 직접적으로
@@ -310,9 +316,9 @@ body{{font-family:'Noto Sans KR',sans-serif;background:#e8eaf0;display:flex;just
         <span class="index-value">{usd_krw} <span class="index-unit">원</span></span>
       </div>
       <div class="index-row">
-        <span class="index-icon">🇯🇵</span>
-        <span class="index-label">일본<span style="font-size:10px;color:#7eb8f7">(JPY)</span></span>
-        <span class="index-value">{jpy_krw} <span class="index-unit">원</span></span>
+        <span class="index-icon">🥇</span>
+        <span class="index-label">금<span style="font-size:10px;color:#7eb8f7">(1온스)</span></span>
+        <span class="index-value">{gold_krw} <span class="index-unit">원</span></span>
       </div>
       <div class="index-row">
         <span class="index-icon">⛽</span>
@@ -405,8 +411,7 @@ def html_to_png(html_content, output_path):
         page = browser.new_page(viewport={"width": 680, "height": 1200})
         page.goto(f"file://{os.path.abspath('temp_card.html')}")
         page.wait_for_timeout(2000)
-        card = page.locator(".card")
-        card.screenshot(path=output_path)
+        page.locator(".card").screenshot(path=output_path)
         browser.close()
 
     os.remove("temp_card.html")
@@ -420,17 +425,16 @@ def send_to_telegram(image_path, market):
     caption = (
         f"📊 <b>JW Financial 아침 브리핑</b>\n"
         f"{TODAY_KR}\n\n"
-        f"코스피 {market['kospi']} | 코스닥 {market['kosdaq']} | USD {market['usd_krw']}원"
+        f"코스피 {market['kospi']} | 코스닥 {market['kosdaq']} | "
+        f"USD {market['usd_krw']}원 | 금 {market['gold_krw']}원"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-
     with open(image_path, "rb") as img:
-        response = requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "caption": caption,
-            "parse_mode": "HTML",
-        }, files={"photo": img})
-
+        response = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": img},
+        )
     if response.status_code == 200:
         print("✅ 텔레그램 발송 완료")
     else:
@@ -443,7 +447,6 @@ def send_to_telegram(image_path, market):
 # ══════════════════════════════════════════════════════
 if __name__ == "__main__":
     output_png = f"news_card_{TODAY_FILE}.png"
-
     print(f"📅 기준 날짜: {TODAY_KR}\n")
 
     print("📊 시장 지표 수집 중...")
@@ -451,7 +454,6 @@ if __name__ == "__main__":
 
     print("\n📰 RSS 뉴스 수집 중...")
     articles = fetch_rss_news(max_per_feed=8)
-
     if not articles:
         raise Exception("수집된 기사가 없습니다.")
 
