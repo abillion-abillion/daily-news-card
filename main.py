@@ -257,9 +257,9 @@ body{{font-family:'Noto Sans KR',sans-serif;background:#e8eaf0;display:flex;just
 <div class="card">
   <div class="header">
     <div class="header-left">
-      <div class="good-morning">☀️ Good Morning</div>
+      <div class="good-morning">☀️Good Day</div>
       <div class="brand-name">JW Financial</div>
-      <div class="main-title">아침을 깨우는<br><span class="highlight">주요뉴스</span></div>
+      <div class="main-title">자산을 지키는<br><span class="highlight">경제뉴스 한 장</span></div>
     </div>
     <div class="index-table">
       <div class="index-row">
