@@ -1,6 +1,4 @@
 import os
-import csv
-import io
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -15,167 +13,165 @@ ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
-# ── KST 기준 오늘 날짜 ────────────────────────────────
+# ── KST 기준 날짜 ─────────────────────────────────────
 kst        = pytz.timezone("Asia/Seoul")
 now_kst    = datetime.now(kst)
-TODAY      = now_kst.strftime("%Y. %m. %d")
 WEEKDAY_KR = "월화수목금토일"[now_kst.weekday()]
 TODAY_FILE = now_kst.strftime("%Y%m%d")
 TODAY_KR   = now_kst.strftime("%Y년 %m월 %d일") + f"({WEEKDAY_KR})"
 
-# ── RSS 피드 목록 ──────────────────────────────────────
+# ── RSS 피드 ──────────────────────────────────────────
 RSS_FEEDS = [
-    {"name": "한국경제-경제",  "url": "https://www.hankyung.com/feed/economy"},
-    {"name": "한국경제-금융",  "url": "https://www.hankyung.com/feed/finance"},
-    {"name": "한국경제-증권",  "url": "https://www.hankyung.com/feed/stock"},
-    {"name": "연합뉴스-경제",  "url": "https://www.yonhapnews.co.kr/rss/economy.xml"},
-    {"name": "연합뉴스-금융",  "url": "https://www.yonhapnews.co.kr/rss/finance.xml"},
-    {"name": "매일경제",       "url": "https://www.mk.co.kr/rss/30100041/"},
-    {"name": "매일경제-증권",  "url": "https://www.mk.co.kr/rss/30200030/"},
-    {"name": "조선비즈",       "url": "https://biz.chosun.com/arc/outboundfeeds/rss/?outputType=xml"},
-    {"name": "SBS-경제",       "url": "https://news.sbs.co.kr/news/RSS.jsp?cateId=economy"},
-    {"name": "KBS-경제",       "url": "https://news.kbs.co.kr/rss/news/news_economy.xml"},
+    {"name": "한국경제-경제", "url": "https://www.hankyung.com/feed/economy"},
+    {"name": "한국경제-금융", "url": "https://www.hankyung.com/feed/finance"},
+    {"name": "매일경제",      "url": "https://www.mk.co.kr/rss/30100041/"},
+    {"name": "매일경제-증권", "url": "https://www.mk.co.kr/rss/30200030/"},
+    {"name": "조선비즈",      "url": "https://biz.chosun.com/arc/outboundfeeds/rss/?outputType=xml"},
+    {"name": "KBS-경제",      "url": "https://news.kbs.co.kr/rss/news/news_economy.xml"},
+    {"name": "머니투데이",    "url": "https://rss.mt.co.kr/mt_economy"},
+    {"name": "이데일리",      "url": "https://rss.edaily.co.kr/edaily_economy.xml"},
 ]
 
-# ── 공통 헤더 ─────────────────────────────────────────
-BROWSER_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
-
-
-# ══════════════════════════════════════════════════════
-# stooq CSV 한 줄 파싱 헬퍼
-# 반환: 최신 종가(float) or None
-# ══════════════════════════════════════════════════════
-def _stooq_close(symbol: str) -> float | None:
-    """
-    stooq.com에서 일봉 CSV를 받아 최신 종가를 반환.
-    GitHub Actions 환경에서 IP 차단 없이 동작 확인된 소스.
-    """
-    url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
-    try:
-        r = requests.get(url, headers={"User-Agent": BROWSER_UA}, timeout=10)
-        r.raise_for_status()
-        reader = csv.DictReader(io.StringIO(r.text))
-        rows = list(reader)
-        if not rows:
-            return None
-        # 최신 날짜 행 (마지막 행)
-        last = rows[-1]
-        close = last.get("Close") or last.get("close")
-        return float(close) if close and close.strip() not in ("", "null") else None
-    except Exception as e:
-        print(f"⚠️  stooq [{symbol}] 실패: {e}")
-        return None
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 
 
 # ══════════════════════════════════════════════════════
 # 1. 시장 지표 수집
-#    코스피/코스닥 → stooq.com (^ksp / ^kosdaq)
-#    USD/KRW      → open.er-api.com (무료, 키 불필요)
-#    금값(XAU)    → stooq.com (xauusd) × USD/KRW
-#    휘발유       → 오피넷 메인 HTML 스크래핑 (키 불필요)
+#    코스피/코스닥 → 네이버 모바일 API (m.stock.naver.com)
+#    USD/KRW      → open.er-api.com
+#    금값(XAU)    → goldprice.org 무료 API
+#    휘발유       → 오피넷 GIS JSON → HTML 스크래핑
 # ══════════════════════════════════════════════════════
 def fetch_market_data() -> dict:
-    data = {
-        "kospi":    "-",
-        "kosdaq":   "-",
-        "usd_krw":  "-",
-        "gold_krw": "-",
-        "gasoline": "-",
-    }
+    data = {"kospi": "-", "kosdaq": "-", "usd_krw": "-", "gold_krw": "-", "gasoline": "-"}
+    headers = {"User-Agent": UA, "Referer": "https://m.stock.naver.com/"}
 
     # ── 코스피 ───────────────────────────────────────
-    v = _stooq_close("^ksp")
-    if v:
-        data["kospi"] = f"{v:,.2f}"
+    try:
+        r = requests.get(
+            "https://m.stock.naver.com/api/index/KOSPI/basic",
+            headers=headers, timeout=8
+        )
+        if r.ok:
+            val = r.json().get("closePrice", "").replace(",", "")
+            if val:
+                data["kospi"] = f"{float(val):,.2f}"
+                print(f"  코스피: {data['kospi']}")
+    except Exception as e:
+        print(f"  코스피 실패: {e}")
 
     # ── 코스닥 ───────────────────────────────────────
-    v = _stooq_close("^kosdaq")
-    if v:
-        data["kosdaq"] = f"{v:,.2f}"
+    try:
+        r = requests.get(
+            "https://m.stock.naver.com/api/index/KOSDAQ/basic",
+            headers=headers, timeout=8
+        )
+        if r.ok:
+            val = r.json().get("closePrice", "").replace(",", "")
+            if val:
+                data["kosdaq"] = f"{float(val):,.2f}"
+                print(f"  코스닥: {data['kosdaq']}")
+    except Exception as e:
+        print(f"  코스닥 실패: {e}")
 
     # ── USD/KRW ──────────────────────────────────────
     usd_krw_float = None
     try:
-        r = requests.get("https://open.er-api.com/v6/latest/USD",
-                         timeout=8)
+        r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
         if r.ok:
             usd_krw_float = r.json().get("rates", {}).get("KRW")
             if usd_krw_float:
                 data["usd_krw"] = f"{usd_krw_float:,.0f}"
+                print(f"  USD/KRW: {data['usd_krw']}")
     except Exception as e:
-        print(f"⚠️  USD/KRW 실패: {e}")
+        print(f"  환율 실패: {e}")
 
-    # ── 금값 (XAU/USD → 원화 환산) ───────────────────
-    xau_usd = _stooq_close("xauusd")
-    if xau_usd and usd_krw_float:
-        gold_krw = xau_usd * usd_krw_float
-        data["gold_krw"] = f"{gold_krw:,.0f}"
-    elif xau_usd:
-        # 환율 없으면 달러 기준으로만 표시
-        data["gold_krw"] = f"${xau_usd:,.0f}"
+    # ── 금값: goldprice.org 무료 API (인증 불필요) ────
+    try:
+        r = requests.get(
+            "https://data-asg.goldprice.org/dbXRates/USD",
+            headers={"User-Agent": UA, "Origin": "https://goldprice.org"},
+            timeout=8
+        )
+        if r.ok:
+            items = r.json().get("items", [])
+            if items:
+                xau_usd = items[0].get("xauPrice")  # 1온스 USD 기준
+                if xau_usd and usd_krw_float:
+                    data["gold_krw"] = f"{float(xau_usd) * usd_krw_float:,.0f}"
+                elif xau_usd:
+                    data["gold_krw"] = f"${float(xau_usd):,.0f}"
+                print(f"  금값: {data['gold_krw']}")
+    except Exception as e:
+        print(f"  금값 실패: {e}")
 
-    # ── 휘발유: 오피넷 메인 HTML 스크래핑 ─────────────
-    # 오피넷 키 있으면 API 우선, 없으면 HTML 파싱
+    # ── 휘발유: 오피넷 GIS JSON ───────────────────────
     opinet_key = os.environ.get("OPINET_API_KEY", "")
     if opinet_key:
         try:
             r = requests.get(
-                f"http://www.opinet.co.kr/api/avgRecentPrice.do"
-                f"?out=json&prodcd=B027&code={opinet_key}",
-                timeout=8,
+                f"http://www.opinet.co.kr/api/avgRecentPrice.do?out=json&prodcd=B027&code={opinet_key}",
+                timeout=8
             )
             if r.ok:
                 items = r.json().get("RESULT", {}).get("OIL", [])
                 if items:
                     data["gasoline"] = f"{float(items[0]['PRICE']):,.0f}"
+                    print(f"  휘발유(API): {data['gasoline']}")
         except Exception as e:
-            print(f"⚠️  오피넷 API 실패: {e}")
-    else:
-        # 키 없을 때: 오피넷 공시가격 페이지 스크래핑
+            print(f"  오피넷 API 실패: {e}")
+
+    if data["gasoline"] == "-":
+        try:
+            r = requests.get(
+                "https://www.opinet.co.kr/gnn/stdgis/getStdGisPriceLastDay.do",
+                headers={"User-Agent": UA, "Referer": "https://www.opinet.co.kr/"},
+                timeout=10
+            )
+            if r.ok:
+                for item in r.json().get("result", []):
+                    if item.get("prodcd") == "B027":
+                        price = str(item.get("avgprc", "")).replace(",", "")
+                        if price:
+                            data["gasoline"] = f"{float(price):,.0f}"
+                            print(f"  휘발유(GIS): {data['gasoline']}")
+                            break
+        except Exception as e:
+            print(f"  오피넷 GIS 실패: {e}")
+
+    if data["gasoline"] == "-":
         try:
             r = requests.get(
                 "https://www.opinet.co.kr/user/main/mainView.do",
-                headers={"User-Agent": BROWSER_UA},
-                timeout=10,
+                headers={"User-Agent": UA}, timeout=10
             )
             if r.ok:
-                # 전국 평균 휘발유 가격 패턴: 숫자 4자리 앞뒤
-                matches = re.findall(r"1[,\.]?\d{3}[\.,]\d", r.text)
+                # 1,600~2,300 범위 소수점 포함 패턴
+                matches = re.findall(r"1[,\s]?[6-9]\d{2}[.,]\d|2[,\s]?[0-2]\d{2}[.,]\d", r.text)
                 prices = []
                 for m in matches:
                     try:
-                        prices.append(float(m.replace(",", ".")))
+                        prices.append(float(m.replace(",", "").replace(" ", ".")))
                     except Exception:
                         pass
-                if prices:
-                    # 1700~2200 범위 값만 필터 (휘발유 합리적 범위)
-                    valid = [p for p in prices if 1700 <= p <= 2200]
-                    if valid:
-                        data["gasoline"] = f"{valid[0]:,.1f}"
+                valid = [p for p in prices if 1600 <= p <= 2300]
+                if valid:
+                    data["gasoline"] = f"{valid[0]:,.1f}"
+                    print(f"  휘발유(HTML): {data['gasoline']}")
         except Exception as e:
-            print(f"⚠️  오피넷 스크래핑 실패: {e}")
+            print(f"  오피넷 HTML 실패: {e}")
 
-    print(
-        f"📊 코스피:{data['kospi']} 코스닥:{data['kosdaq']} "
-        f"USD:{data['usd_krw']} 금:{data['gold_krw']} 유가:{data['gasoline']}"
-    )
+    print(f"📊 코스피:{data['kospi']} 코스닥:{data['kosdaq']} "
+          f"USD:{data['usd_krw']} 금:{data['gold_krw']} 유가:{data['gasoline']}")
     return data
 
 
 # ══════════════════════════════════════════════════════
-# 2. RSS 뉴스 수집 (기존 유지)
+# 2. RSS 뉴스 수집
 # ══════════════════════════════════════════════════════
 def fetch_rss_news(max_per_feed=8):
     articles = []
-    headers = {
-        "User-Agent": BROWSER_UA,
-        "Accept": "application/rss+xml, application/xml, text/xml, */*",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
+    headers = {"User-Agent": UA, "Accept": "application/rss+xml,*/*", "Accept-Language": "ko-KR,ko;q=0.9"}
     yesterday_kst = (now_kst - timedelta(days=1)).date()
 
     for feed in RSS_FEEDS:
@@ -185,8 +181,7 @@ def fetch_rss_news(max_per_feed=8):
             try:
                 root = ET.fromstring(resp.content)
             except ET.ParseError:
-                content = resp.content.decode("euc-kr", errors="replace").encode("utf-8")
-                root = ET.fromstring(content)
+                root = ET.fromstring(resp.content.decode("euc-kr", errors="replace").encode("utf-8"))
 
             items = root.findall(".//item")
             count = 0
@@ -209,26 +204,23 @@ def fetch_rss_news(max_per_feed=8):
                     articles.append({"source": feed["name"], "title": title,
                                      "desc": desc[:500], "date": pub_date})
                     count += 1
-            print(f"✅ {feed['name']}: {count}개 수집")
+            print(f"✅ {feed['name']}: {count}개")
         except Exception as e:
             print(f"⚠️  {feed['name']} 실패: {e}")
 
-    print(f"\n📰 총 {len(articles)}개 기사 수집\n")
+    print(f"\n📰 총 {len(articles)}개 수집\n")
     return articles
 
 
 # ══════════════════════════════════════════════════════
-# 3. Claude → HTML 카드 생성 (JPY → 금값으로 교체)
+# 3. Claude → HTML 카드
 # ══════════════════════════════════════════════════════
 def generate_card_html(articles, market):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     articles_text = ""
     for i, a in enumerate(articles, 1):
-        articles_text += (
-            f"\n[{i}] 출처: {a['source']} | 날짜: {a['date']}\n"
-            f"제목: {a['title']}\n내용: {a['desc']}\n---"
-        )
+        articles_text += f"\n[{i}] 출처:{a['source']} | 날짜:{a['date']}\n제목:{a['title']}\n내용:{a['desc']}\n---"
 
     kospi    = market["kospi"]
     kosdaq   = market["kosdaq"]
@@ -330,51 +322,33 @@ body{{font-family:'Noto Sans KR',sans-serif;background:#e8eaf0;display:flex;just
       </div>
     </div>
   </div>
-
-  <div class="date-bar">
-    <div class="date-text">{TODAY_KR}</div>
-  </div>
-
+  <div class="date-bar"><div class="date-text">{TODAY_KR}</div></div>
   <div class="news-section">
     <div class="news-item">
       <div class="num-badge">01</div>
-      <div>
-        <div class="news-tag">[섹터]</div>
-        <div class="news-headline">[헤드라인]</div>
-        <div class="news-body">[본문 2~3문장. 핵심 수치는 &lt;em&gt;태그로]</div>
-      </div>
+      <div><div class="news-tag">[섹터]</div><div class="news-headline">[헤드라인]</div>
+      <div class="news-body">[본문 2~3문장. 핵심 수치는 &lt;em&gt;태그로]</div></div>
     </div>
     <div class="news-item">
       <div class="num-badge">02</div>
-      <div>
-        <div class="news-tag">[섹터]</div>
-        <div class="news-headline">[헤드라인]</div>
-        <div class="news-body">[본문]</div>
-      </div>
+      <div><div class="news-tag">[섹터]</div><div class="news-headline">[헤드라인]</div>
+      <div class="news-body">[본문]</div></div>
     </div>
     <div class="news-item">
       <div class="num-badge">03</div>
-      <div>
-        <div class="news-tag">[섹터]</div>
-        <div class="news-headline">[헤드라인]</div>
-        <div class="news-body">[본문]</div>
-      </div>
+      <div><div class="news-tag">[섹터]</div><div class="news-headline">[헤드라인]</div>
+      <div class="news-body">[본문]</div></div>
     </div>
     <div class="news-item">
       <div class="num-badge">04</div>
-      <div>
-        <div class="news-tag">[섹터]</div>
-        <div class="news-headline">[헤드라인]</div>
-        <div class="news-body">[본문]</div>
-      </div>
+      <div><div class="news-tag">[섹터]</div><div class="news-headline">[헤드라인]</div>
+      <div class="news-body">[본문]</div></div>
     </div>
   </div>
-
   <div class="vocab-section">
     <div class="vocab-header">📌 오늘의 시사&amp;경제용어 : [용어명]</div>
     <div class="vocab-body">[용어 설명 3~4문장]</div>
   </div>
-
   <div class="quote-bar">
     <div class="quote-text">"[명언]"</div>
     <div class="quote-source">– [출처]</div>
@@ -385,27 +359,23 @@ body{{font-family:'Noto Sans KR',sans-serif;background:#e8eaf0;display:flex;just
 """
 
     message = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=4096,
+        model="claude-opus-4-5", max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
-
     html_content = message.content[0].text
     if "```html" in html_content:
         html_content = html_content.split("```html")[1].split("```")[0].strip()
     elif "```" in html_content:
         html_content = html_content.split("```")[1].split("```")[0].strip()
-
     return html_content
 
 
 # ══════════════════════════════════════════════════════
-# 4. HTML → PNG 변환
+# 4. HTML → PNG
 # ══════════════════════════════════════════════════════
 def html_to_png(html_content, output_path):
     with open("temp_card.html", "w", encoding="utf-8") as f:
         f.write(html_content)
-
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 680, "height": 1200})
@@ -413,9 +383,8 @@ def html_to_png(html_content, output_path):
         page.wait_for_timeout(2000)
         page.locator(".card").screenshot(path=output_path)
         browser.close()
-
     os.remove("temp_card.html")
-    print(f"✅ PNG 생성 완료: {output_path}")
+    print(f"✅ PNG 생성: {output_path}")
 
 
 # ══════════════════════════════════════════════════════
@@ -423,23 +392,21 @@ def html_to_png(html_content, output_path):
 # ══════════════════════════════════════════════════════
 def send_to_telegram(image_path, market):
     caption = (
-        f"📊 <b>JW Financial 아침 브리핑</b>\n"
-        f"{TODAY_KR}\n\n"
+        f"📊 <b>JW Financial 아침 브리핑</b>\n{TODAY_KR}\n\n"
         f"코스피 {market['kospi']} | 코스닥 {market['kosdaq']} | "
         f"USD {market['usd_krw']}원 | 금 {market['gold_krw']}원"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     with open(image_path, "rb") as img:
-        response = requests.post(
+        r = requests.post(
             url,
             data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "HTML"},
-            files={"photo": img},
+            files={"photo": img}
         )
-    if response.status_code == 200:
+    if r.status_code == 200:
         print("✅ 텔레그램 발송 완료")
     else:
-        print(f"❌ 텔레그램 발송 실패: {response.text}")
-        raise Exception(f"Telegram error: {response.text}")
+        raise Exception(f"Telegram error: {r.text}")
 
 
 # ══════════════════════════════════════════════════════
@@ -447,17 +414,17 @@ def send_to_telegram(image_path, market):
 # ══════════════════════════════════════════════════════
 if __name__ == "__main__":
     output_png = f"news_card_{TODAY_FILE}.png"
-    print(f"📅 기준 날짜: {TODAY_KR}\n")
+    print(f"📅 {TODAY_KR}\n")
 
     print("📊 시장 지표 수집 중...")
     market = fetch_market_data()
 
     print("\n📰 RSS 뉴스 수집 중...")
-    articles = fetch_rss_news(max_per_feed=8)
+    articles = fetch_rss_news()
     if not articles:
         raise Exception("수집된 기사가 없습니다.")
 
-    print("🎨 카드 HTML 생성 중...")
+    print("🎨 카드 생성 중...")
     html = generate_card_html(articles, market)
 
     print("🖼️  PNG 변환 중...")
