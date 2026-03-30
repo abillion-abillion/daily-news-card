@@ -32,49 +32,50 @@ RSS_FEEDS = [
     {"name": "이데일리",      "url": "https://rss.edaily.co.kr/edaily_economy.xml"},
 ]
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+UA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+NAVER_H = {"User-Agent": UA, "Referer": "https://m.stock.naver.com/"}
+
+
+def _naver_index(candidates: list[str]) -> str | None:
+    """
+    네이버 모바일 index API 후보를 순서대로 시도.
+    성공하면 closePrice 문자열 반환, 모두 실패 시 None.
+    상세 로그를 찍어 GitHub Actions에서 원인 추적 가능.
+    """
+    for symbol in candidates:
+        url = f"https://m.stock.naver.com/api/index/{symbol}/basic"
+        try:
+            r = requests.get(url, headers=NAVER_H, timeout=8)
+            print(f"  [{symbol}] status={r.status_code} body={r.text[:120]}")
+            if r.ok:
+                val = r.json().get("closePrice", "").replace(",", "")
+                if val:
+                    return val
+        except Exception as e:
+            print(f"  [{symbol}] 실패: {e}")
+    return None
 
 
 # ══════════════════════════════════════════════════════
 # 1. 시장 지표 수집
-#    코스피/코스닥 → 네이버 모바일 API (m.stock.naver.com)
-#    USD/KRW      → open.er-api.com
-#    금값(XAU)    → goldprice.org 무료 API
-#    휘발유       → 오피넷 GIS JSON → HTML 스크래핑
 # ══════════════════════════════════════════════════════
 def fetch_market_data() -> dict:
     data = {"kospi": "-", "kosdaq": "-", "usd_krw": "-", "gold_krw": "-", "gasoline": "-"}
-    headers = {"User-Agent": UA, "Referer": "https://m.stock.naver.com/"}
 
     # ── 코스피 ───────────────────────────────────────
-    try:
-        r = requests.get(
-            "https://m.stock.naver.com/api/index/KOSPI/basic",
-            headers=headers, timeout=8
-        )
-        if r.ok:
-            val = r.json().get("closePrice", "").replace(",", "")
-            if val:
-                data["kospi"] = f"{float(val):,.2f}"
-                print(f"  코스피: {data['kospi']}")
-    except Exception as e:
-        print(f"  코스피 실패: {e}")
+    print("[코스피]")
+    v = _naver_index(["KOSPI"])
+    if v:
+        data["kospi"] = f"{float(v):,.2f}"
 
     # ── 코스닥 ───────────────────────────────────────
-    try:
-        r = requests.get(
-            "https://m.stock.naver.com/api/index/KOSDAQ/basic",
-            headers=headers, timeout=8
-        )
-        if r.ok:
-            val = r.json().get("closePrice", "").replace(",", "")
-            if val:
-                data["kosdaq"] = f"{float(val):,.2f}"
-                print(f"  코스닥: {data['kosdaq']}")
-    except Exception as e:
-        print(f"  코스닥 실패: {e}")
+    print("[코스닥]")
+    v = _naver_index(["KOSDAQ"])
+    if v:
+        data["kosdaq"] = f"{float(v):,.2f}"
 
     # ── USD/KRW ──────────────────────────────────────
+    print("[USD/KRW]")
     usd_krw_float = None
     try:
         r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=8)
@@ -84,84 +85,69 @@ def fetch_market_data() -> dict:
                 data["usd_krw"] = f"{usd_krw_float:,.0f}"
                 print(f"  USD/KRW: {data['usd_krw']}")
     except Exception as e:
-        print(f"  환율 실패: {e}")
+        print(f"  USD/KRW 실패: {e}")
 
-    # ── 금값: goldprice.org 무료 API (인증 불필요) ────
-    try:
-        r = requests.get(
-            "https://data-asg.goldprice.org/dbXRates/USD",
-            headers={"User-Agent": UA, "Origin": "https://goldprice.org"},
-            timeout=8
-        )
-        if r.ok:
-            items = r.json().get("items", [])
-            if items:
-                xau_usd = items[0].get("xauPrice")  # 1온스 USD 기준
-                if xau_usd and usd_krw_float:
-                    data["gold_krw"] = f"{float(xau_usd) * usd_krw_float:,.0f}"
-                elif xau_usd:
-                    data["gold_krw"] = f"${float(xau_usd):,.0f}"
-                print(f"  금값: {data['gold_krw']}")
-    except Exception as e:
-        print(f"  금값 실패: {e}")
-
-    # ── 휘발유: 오피넷 GIS JSON ───────────────────────
-    opinet_key = os.environ.get("OPINET_API_KEY", "")
-    if opinet_key:
+    # ── 금값: 네이버 모바일 API 후보 탐색 ────────────
+    # 네이버 금융에서 사용하는 금 심볼 후보들
+    print("[금값 탐색]")
+    gold_raw = _naver_index([
+        "GOLD",          # 국제 금 지수
+        "GC",            # COMEX 금 선물
+        "XAUUSD",        # XAU/USD
+        "KRX:GOLD",      # KRX 금시장
+        "KOSPIGOLD",     # 코스피 금 관련
+    ])
+    if gold_raw:
         try:
-            r = requests.get(
-                f"http://www.opinet.co.kr/api/avgRecentPrice.do?out=json&prodcd=B027&code={opinet_key}",
-                timeout=8
-            )
-            if r.ok:
-                items = r.json().get("RESULT", {}).get("OIL", [])
-                if items:
-                    data["gasoline"] = f"{float(items[0]['PRICE']):,.0f}"
-                    print(f"  휘발유(API): {data['gasoline']}")
+            gold_val = float(gold_raw)
+            # 단위가 USD면 KRW 환산, 이미 KRW면 그대로
+            if gold_val < 10000 and usd_krw_float:  # USD 기준 (3000 달러 수준)
+                data["gold_krw"] = f"{gold_val * usd_krw_float:,.0f}"
+            else:  # 이미 원화 기준
+                data["gold_krw"] = f"{gold_val:,.0f}"
+            print(f"  금값: {data['gold_krw']}")
         except Exception as e:
-            print(f"  오피넷 API 실패: {e}")
+            print(f"  금값 변환 실패: {e}")
 
+    # ── 휘발유: 네이버 모바일 API 후보 탐색 ──────────
+    # 네이버 금융에서 사용하는 유가 심볼 후보들
+    print("[휘발유/유가 탐색]")
+    oil_raw = _naver_index([
+        "WTI",           # WTI 원유
+        "CL",            # NYMEX WTI 선물
+        "OIL",           # 원유 일반
+        "CRUDE",         # 원유
+        "CLMAIN",        # WTI 메인
+    ])
+    if oil_raw:
+        try:
+            oil_val = float(oil_raw)
+            # WTI는 달러 기준 (60~100 달러 수준)
+            if oil_val < 500:
+                data["gasoline"] = f"WTI ${oil_val:,.2f}"
+            else:
+                data["gasoline"] = f"{oil_val:,.0f}"
+            print(f"  유가: {data['gasoline']}")
+        except Exception as e:
+            print(f"  유가 변환 실패: {e}")
+
+    # 네이버 실패 시 오피넷 폴백 (키 있을 때)
     if data["gasoline"] == "-":
-        try:
-            r = requests.get(
-                "https://www.opinet.co.kr/gnn/stdgis/getStdGisPriceLastDay.do",
-                headers={"User-Agent": UA, "Referer": "https://www.opinet.co.kr/"},
-                timeout=10
-            )
-            if r.ok:
-                for item in r.json().get("result", []):
-                    if item.get("prodcd") == "B027":
-                        price = str(item.get("avgprc", "")).replace(",", "")
-                        if price:
-                            data["gasoline"] = f"{float(price):,.0f}"
-                            print(f"  휘발유(GIS): {data['gasoline']}")
-                            break
-        except Exception as e:
-            print(f"  오피넷 GIS 실패: {e}")
+        opinet_key = os.environ.get("OPINET_API_KEY", "")
+        if opinet_key:
+            try:
+                r = requests.get(
+                    f"http://www.opinet.co.kr/api/avgRecentPrice.do?out=json&prodcd=B027&code={opinet_key}",
+                    timeout=8)
+                if r.ok:
+                    items = r.json().get("RESULT", {}).get("OIL", [])
+                    if items:
+                        data["gasoline"] = f"{float(items[0]['PRICE']):,.0f}"
+                        print(f"  휘발유(오피넷): {data['gasoline']}")
+            except Exception as e:
+                print(f"  오피넷 실패: {e}")
 
-    if data["gasoline"] == "-":
-        try:
-            r = requests.get(
-                "https://www.opinet.co.kr/user/main/mainView.do",
-                headers={"User-Agent": UA}, timeout=10
-            )
-            if r.ok:
-                # 1,600~2,300 범위 소수점 포함 패턴
-                matches = re.findall(r"1[,\s]?[6-9]\d{2}[.,]\d|2[,\s]?[0-2]\d{2}[.,]\d", r.text)
-                prices = []
-                for m in matches:
-                    try:
-                        prices.append(float(m.replace(",", "").replace(" ", ".")))
-                    except Exception:
-                        pass
-                valid = [p for p in prices if 1600 <= p <= 2300]
-                if valid:
-                    data["gasoline"] = f"{valid[0]:,.1f}"
-                    print(f"  휘발유(HTML): {data['gasoline']}")
-        except Exception as e:
-            print(f"  오피넷 HTML 실패: {e}")
-
-    print(f"📊 코스피:{data['kospi']} 코스닥:{data['kosdaq']} "
+    print(f"\n📊 코스피:{data['kospi']} 코스닥:{data['kosdaq']} "
           f"USD:{data['usd_krw']} 금:{data['gold_krw']} 유가:{data['gasoline']}")
     return data
 
@@ -313,9 +299,9 @@ body{{font-family:'Noto Sans KR',sans-serif;background:#e8eaf0;display:flex;just
         <span class="index-value">{gold_krw} <span class="index-unit">원</span></span>
       </div>
       <div class="index-row">
-        <span class="index-icon">⛽</span>
-        <span class="index-label">휘발유<span style="font-size:10px;color:#7eb8f7">(리터당)</span></span>
-        <span class="index-value">{gasoline} <span class="index-unit">원</span></span>
+        <span class="index-icon">🛢️</span>
+        <span class="index-label">WTI유가<span style="font-size:10px;color:#7eb8f7">(배럴)</span></span>
+        <span class="index-value">{gasoline} <span class="index-unit"></span></span>
       </div>
       <div style="text-align:right;margin-top:2px">
         <span style="font-size:9px;color:#7eb8f7">※상기 지수 전일 마감 기준</span>
